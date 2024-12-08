@@ -6,15 +6,12 @@ import (
 	"go-rpc/message"
 	"go-rpc/serialize"
 	"reflect"
+	"strconv"
 )
 
-// initClientProxy go 的代理模式 for client
-func initClientProxy(addr string, service Service) error {
-	client, err := NewClient(addr)
-	if err != nil {
-		return err
-	}
-	return setFuncField(service, client, &serialize.JsonSerializer{})
+// InitService go 的代理模式 for client
+func (c *Client) InitService(service Service) error {
+	return setFuncField(service, c, c.serializer)
 }
 
 func setFuncField(service Service, p Proxy, s serialize.Serializer) error {
@@ -57,6 +54,17 @@ func setFuncField(service Service, p Proxy, s serialize.Serializer) error {
 				Data:        reqData,
 				Serializer:  s.Code(),
 			}
+
+			//
+			meta := make(map[string]string, 2)
+
+			if deadline, ok := ctx.Deadline(); ok {
+				meta["deadline"] = strconv.FormatInt(deadline.UnixMilli(), 10)
+			}
+			if isOneway(ctx) {
+				meta["one-way"] = "true"
+			}
+			req.Meta = meta
 
 			resp, err := p.Invoke(ctx, req)
 			if err != nil {

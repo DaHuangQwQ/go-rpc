@@ -3,6 +3,7 @@ package go_rpc
 import (
 	"context"
 	"github.com/silenceper/pool"
+	"go-rpc/internal/errs"
 	"go-rpc/message"
 	"go-rpc/serialize"
 	"net"
@@ -31,22 +32,47 @@ func NewClient(addr string) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		pool: p,
+		pool:       p,
+		serializer: &serialize.JsonSerializer{},
 	}, nil
 }
 
 func (c *Client) Invoke(ctx context.Context, req *message.Request) (*message.Response, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	ch := make(chan struct{})
+
+	var (
+		resp *message.Response
+		err  error
+	)
+	go func() {
+		resp, err = c.doInvoke(ctx, req)
+		close(ch)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-ch:
+		return resp, err
+	}
+}
+
+func (c *Client) doInvoke(ctx context.Context, req *message.Request) (*message.Response, error) {
 	req.CalculateHeaderLength()
 	req.CalculateBodyLength()
 	data := req.Encode()
-	resp, err := c.Send(data)
+	resp, err := c.Send(ctx, data)
 	if err != nil {
 		return nil, err
 	}
 	return message.DecodeRes(resp), nil
 }
 
-func (c *Client) Send(data []byte) ([]byte, error) {
+func (c *Client) Send(ctx context.Context, data []byte) ([]byte, error) {
 	val, err := c.pool.Get()
 	if err != nil {
 		return nil, err
@@ -58,6 +84,10 @@ func (c *Client) Send(data []byte) ([]byte, error) {
 	_, err = conn.Write(data)
 	if err != nil {
 		return nil, err
+	}
+
+	if isOneway(ctx) {
+		return nil, errs.ErrIsOneway
 	}
 	return ReadMsg(conn)
 }

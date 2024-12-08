@@ -3,10 +3,13 @@ package go_rpc
 import (
 	"context"
 	"errors"
+	"go-rpc/internal/errs"
 	"go-rpc/message"
 	"go-rpc/serialize"
 	"net"
 	"reflect"
+	"strconv"
+	"time"
 )
 
 type Server struct {
@@ -67,7 +70,27 @@ func (s *Server) handleConn(conn net.Conn) error {
 			return err
 		}
 
-		resp, err := s.Invoke(context.Background(), req)
+		ctx := context.Background()
+
+		var cancel context.CancelFunc
+		if deadlineStr, ok := req.Meta["deadline"]; ok {
+			if deadline, er := strconv.ParseInt(deadlineStr, 10, 64); er == nil {
+				ctx, cancel = context.WithDeadline(ctx, time.UnixMilli(deadline))
+			}
+
+		}
+
+		oneway, ok := req.Meta["one-way"]
+		if ok && oneway == "true" {
+			go func() {
+				_, _ = s.Invoke(CtxWithOneway(ctx), req)
+			}()
+			cancel()
+			return errs.ErrIsOneway
+		}
+
+		resp, err := s.Invoke(ctx, req)
+		cancel()
 		if err != nil {
 			resp.Error = []byte(err.Error())
 		}
@@ -88,9 +111,6 @@ func (s *Server) Invoke(ctx context.Context, req *message.Request) (*message.Res
 	}
 
 	respData, err := service.invoke(ctx, req)
-	if err != nil {
-		return nil, err
-	}
 
 	return &message.Response{
 		RequestId:  req.RequestId,
@@ -98,7 +118,7 @@ func (s *Server) Invoke(ctx context.Context, req *message.Request) (*message.Res
 		Compresser: req.Compresser,
 		Serializer: req.Serializer,
 		Data:       respData,
-	}, nil
+	}, err
 }
 
 type reflectionStub struct {
@@ -110,7 +130,7 @@ type reflectionStub struct {
 func (s *reflectionStub) invoke(ctx context.Context, req *message.Request) ([]byte, error) {
 	method := s.value.MethodByName(req.MethodName)
 	in := make([]reflect.Value, 2)
-	in[0] = reflect.ValueOf(context.Background())
+	in[0] = reflect.ValueOf(ctx)
 	inReq := reflect.New(method.Type().In(1).Elem())
 
 	serializer, ok := s.serializes[req.Serializer]
@@ -124,8 +144,15 @@ func (s *reflectionStub) invoke(ctx context.Context, req *message.Request) ([]by
 	}
 	in[1] = inReq
 	results := method.Call(in)
-	if results[1].Interface() != nil {
-		return nil, results[1].Interface().(error)
+
+	resp, err := serializer.Encode(results[0].Interface())
+	if err != nil {
+		return nil, err
 	}
-	return serializer.Encode(results[0].Interface())
+
+	if results[1].Interface() != nil {
+		return resp, results[1].Interface().(error)
+	}
+
+	return resp, nil
 }
