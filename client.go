@@ -4,12 +4,14 @@ import (
 	"context"
 	"github.com/silenceper/pool"
 	"go-rpc/message"
+	"go-rpc/serialize"
 	"net"
 	"time"
 )
 
 type Client struct {
-	pool pool.Pool
+	pool       pool.Pool
+	serializer serialize.Serializer
 }
 
 func NewClient(addr string) (*Client, error) {

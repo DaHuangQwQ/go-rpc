@@ -2,27 +2,37 @@ package go_rpc
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"go-rpc/message"
+	"go-rpc/serialize"
 	"net"
 	"reflect"
 )
 
 type Server struct {
-	services map[string]reflectionStub
+	services   map[string]reflectionStub
+	serializes map[uint8]serialize.Serializer
 }
 
 func NewServer() *Server {
 	return &Server{
 		services: make(map[string]reflectionStub, 16),
+		serializes: map[uint8]serialize.Serializer{
+			1: &serialize.JsonSerializer{},
+			2: &serialize.ProtoSerializer{},
+		},
 	}
+}
+
+func (s *Server) RegisterSerializer(serializer serialize.Serializer) {
+	s.serializes[serializer.Code()] = serializer
 }
 
 func (s *Server) RegisterService(service Service) {
 	s.services[service.Name()] = reflectionStub{
-		s:     service,
-		value: reflect.ValueOf(service),
+		s:          service,
+		value:      reflect.ValueOf(service),
+		serializes: s.serializes,
 	}
 }
 
@@ -77,7 +87,7 @@ func (s *Server) Invoke(ctx context.Context, req *message.Request) (*message.Res
 		return nil, errors.New("你要调用的服务不存在")
 	}
 
-	respData, err := service.invoke(ctx, req.MethodName, req.Data)
+	respData, err := service.invoke(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -92,16 +102,23 @@ func (s *Server) Invoke(ctx context.Context, req *message.Request) (*message.Res
 }
 
 type reflectionStub struct {
-	s     Service
-	value reflect.Value
+	s          Service
+	value      reflect.Value
+	serializes map[uint8]serialize.Serializer
 }
 
-func (s *reflectionStub) invoke(ctx context.Context, methodName string, data []byte) ([]byte, error) {
-	method := s.value.MethodByName(methodName)
+func (s *reflectionStub) invoke(ctx context.Context, req *message.Request) ([]byte, error) {
+	method := s.value.MethodByName(req.MethodName)
 	in := make([]reflect.Value, 2)
 	in[0] = reflect.ValueOf(context.Background())
 	inReq := reflect.New(method.Type().In(1).Elem())
-	err := json.Unmarshal(data, inReq.Interface())
+
+	serializer, ok := s.serializes[req.Serializer]
+	if !ok {
+		return nil, errors.New("go-rpc: no such serializer")
+	}
+
+	err := serializer.Decode(req.Data, inReq.Interface())
 	if err != nil {
 		return nil, err
 	}
@@ -110,5 +127,5 @@ func (s *reflectionStub) invoke(ctx context.Context, methodName string, data []b
 	if results[1].Interface() != nil {
 		return nil, results[1].Interface().(error)
 	}
-	return json.Marshal(results[0].Interface())
+	return serializer.Encode(results[0].Interface())
 }

@@ -2,9 +2,9 @@ package go_rpc
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"go-rpc/message"
+	"go-rpc/serialize"
 	"reflect"
 )
 
@@ -14,10 +14,10 @@ func initClientProxy(addr string, service Service) error {
 	if err != nil {
 		return err
 	}
-	return setFuncField(service, client)
+	return setFuncField(service, client, &serialize.JsonSerializer{})
 }
 
-func setFuncField(service Service, p Proxy) error {
+func setFuncField(service Service, p Proxy, s serialize.Serializer) error {
 	if service == nil {
 		return errors.New("go-rpc: service is nil")
 	}
@@ -47,7 +47,7 @@ func setFuncField(service Service, p Proxy) error {
 		fn := reflect.MakeFunc(fieldTyp.Type, func(args []reflect.Value) (results []reflect.Value) {
 			retVal := reflect.New(fieldTyp.Type.Out(0).Elem())
 			ctx := args[0].Interface().(context.Context)
-			reqData, err := json.Marshal(args[1].Interface())
+			reqData, err := s.Encode(args[1].Interface())
 			if err != nil {
 				return []reflect.Value{retVal, reflect.ValueOf(err)}
 			}
@@ -55,6 +55,7 @@ func setFuncField(service Service, p Proxy) error {
 				ServiceName: service.Name(),
 				MethodName:  fieldTyp.Name,
 				Data:        reqData,
+				Serializer:  s.Code(),
 			}
 
 			resp, err := p.Invoke(ctx, req)
@@ -68,7 +69,7 @@ func setFuncField(service Service, p Proxy) error {
 			}
 
 			if len(resp.Data) > 0 {
-				err = json.Unmarshal(resp.Data, retVal.Interface())
+				err = s.Decode(resp.Data, retVal.Interface())
 				if err != nil {
 					// 反序列化的 error
 					return []reflect.Value{retVal, reflect.ValueOf(err)}
